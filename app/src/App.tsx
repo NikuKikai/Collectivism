@@ -2,8 +2,31 @@ import React from 'react';
 import * as ort from 'onnxruntime-web';
 
 
+const W = 46;
+const H = 46;
+const MODEL_NAME = 'short40_default';
+
 const angleArr = Float64Array.from([0]);
 const angle = new ort.Tensor('float64', angleArr, [1]);
+
+
+type OriginalConfig = {
+  name: string,
+  image: string,
+  CH_ALL: number,
+  image_pad: number,
+  batch_size: number,
+  betas: number[],
+  damage_samples_in_batch: 3,
+  fire_rate: number,
+  hidden_size: number,
+  lr: number,
+  lr_gamma: number,
+  n_epoch: number,
+  pool_size: number,
+  steps_max: number,
+  steps_min: number,
+}
 
 
 function App() {
@@ -14,8 +37,9 @@ function App() {
   const isMouseDownRef = React.useRef<boolean>(false);
   const mouseEventsRef = React.useRef<React.MouseEvent[]>([]);
 
+  const configRef = React.useRef<OriginalConfig>();
+
   const canvasRatio = 0.8;
-  const dotSize = vmin * canvasRatio / 32;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const offsetX = Math.floor((vw - vmin * canvasRatio)/2);
@@ -33,17 +57,24 @@ function App() {
     // Init Model
     const init = async () => {
       try {
+        // Get config
+        const response = await fetch(process.env.PUBLIC_URL + `/weights/${MODEL_NAME}.json`);
+        const cfg = await response.json() as OriginalConfig;
+        configRef.current = cfg;
+        const CH = cfg.CH_ALL;
+        console.log('Config:', cfg);
+
         // Create session
-        const session = await ort.InferenceSession.create( process.env.PUBLIC_URL + '/weights/original_ch16_step48-64.pth.onnx');
+        const session = await ort.InferenceSession.create(process.env.PUBLIC_URL + `/weights/${MODEL_NAME}.onnx`);
 
         sessionRef.current = session;
         console.log(session.inputNames, session.outputNames);
 
         // Initial state
-        const stateArr = new Float32Array(32 * 32 * 16);
-        for (let i=3; i<16; i++)
-          stateArr[15*32*16+15*16+i] = 1;
-        const state0 = new ort.Tensor('float32', stateArr, [1, 32, 32, 16]);
+        const stateArr = new Float32Array(W*H*CH);
+        for (let i=3; i<CH; i++)
+          stateArr[Math.floor(H/2)*W*CH + Math.floor(W/2)*CH+i] = 1;
+        const state0 = new ort.Tensor('float32', stateArr, [1, H, W, CH]);
 
         setState(state0);
 
@@ -64,26 +95,30 @@ function App() {
     const session = sessionRef.current;
 
     (async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await new Promise((resolve) => setTimeout(resolve, 10));
       let s = state;
+      const CH = configRef.current!.CH_ALL;
+      const t0 = Date.now()
 
       // Damage
       const es = mouseEventsRef.current;
+      const dotSizeX = vmin * canvasRatio / W;
+      const dotSizeY = vmin * canvasRatio / H;
       es.forEach(e => {
-        const mx = (e.clientX-offsetX)/dotSize-0.5;
-        const my = (e.clientY-offsetY)/dotSize-0.5;
+        const mx = (e.clientX-offsetX)/dotSizeX-0.5;
+        const my = (e.clientY-offsetY)/dotSizeY-0.5;
         const array = state.data as Float32Array;
         const r = 2;
 
-        for (let y=0; y<32; y++) {
-          for (let x=0; x<32; x++) {
+        for (let y=0; y<H; y++) {
+          for (let x=0; x<W; x++) {
             if ((mx-x)*(mx-x) + (my-y)*(my-y) <= r*r) {
-              for (let ch=0; ch<16; ch++)
-                array[y*32*16+x*16+ch] = 0;
+              for (let ch=0; ch<CH; ch++)
+                array[y*W*CH+x*CH+ch] = 0;
             }
           }
         }
-        s = new ort.Tensor('float32', array, [1, 32, 32, 16]);
+        s = new ort.Tensor('float32', array, [1, H, W, CH]);
       });
       mouseEventsRef.current = [];
 
@@ -92,7 +127,7 @@ function App() {
       const results = await session.run(feeds);
       const stateArr_ = results[89].data as Float32Array;
 
-      setState(new ort.Tensor('float32', stateArr_, [1, 32, 32, 16]));
+      setState(new ort.Tensor('float32', stateArr_, [1, H, W, CH]));
     })();
   }, [state]);
 
@@ -112,14 +147,17 @@ function App() {
   const _render = () => {
     if (!state) return undefined;
     const array = state.data as Float32Array;
+    const CH = configRef.current!.CH_ALL;
+    const dotSizeX = vmin * canvasRatio / W;
+    const dotSizeY = vmin * canvasRatio / H;
 
     const res = [];
-    for (let y=0; y<32; y++) {
-      for (let x=0; x<32; x++) {
-        let r = array[y*32*16+x*16+0];
-        let g = array[y*32*16+x*16+1];
-        let b = array[y*32*16+x*16+2];
-        const a = array[y*32*16+x*16+3];
+    for (let y=0; y<H; y++) {
+      for (let x=0; x<W; x++) {
+        let r = array[y*W*CH+x*CH+0];
+        let g = array[y*W*CH+x*CH+1];
+        let b = array[y*W*CH+x*CH+2];
+        const a = array[y*W*CH+x*CH+3];
         r = Math.max(0, Math.min(1-a+r, 0.999)) * 255;
         g = Math.max(0, Math.min(1-a+g, 0.999)) * 255;
         b = Math.max(0, Math.min(1-a+b, 0.999)) * 255;
@@ -127,15 +165,15 @@ function App() {
         g = Math.floor(g);
         b = Math.floor(b);
 
-        let left = Math.floor(dotSize*x);
-        let top = Math.floor(dotSize*y);
-        let w = Math.floor(dotSize*(x+1)) - left;
-        let h = Math.floor(dotSize*(y+1)) - top;
+        let left = Math.floor(dotSizeX*x);
+        let top = Math.floor(dotSizeY*y);
+        let w = Math.floor(dotSizeX*(x+1)) - left;
+        let h = Math.floor(dotSizeY*(y+1)) - top;
         left += offsetX;
         top += offsetY;
 
         res.push(
-          <div key={y*32+x} style={{
+          <div key={y*W+x} style={{
             position: 'absolute',
             width: `${w}px`,
             height: `${h}px`,
